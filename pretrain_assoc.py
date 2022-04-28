@@ -17,8 +17,11 @@ BILINEAR_MODE = 'bilin'
 DISTMULT = 'distmult'
 DIAG_RANK1_MODE = 'diag_r1'
 TRANSLATIONAL_EMBED_MODE = 'transE'
+STRUCTURED_EMBED_MODE = 'sE'
+LIEARE = 'lineaRE'
+QUATDE = 'quatDE'
 
-MODES = [BILINEAR_MODE, DISTMULT, DIAG_RANK1_MODE, TRANSLATIONAL_EMBED_MODE]
+MODES = [BILINEAR_MODE, DISTMULT, DIAG_RANK1_MODE, TRANSLATIONAL_EMBED_MODE, STRUCTURED_EMBED_MODE, LIEARE, QUATDE]
 MODES_STR = ', '.join(MODES)
 
 
@@ -73,16 +76,72 @@ class AssociationModel:
             assoc_dim = self.emb_dim
         elif self.mode == DISTMULT:                 # diagonal bilinear matrix
             assoc_dim = self.emb_dim
+        elif self.mode == STRUCTURED_EMBED_MODE:
+            assoc_dim = (2, self.emb_dim, self.emb_dim)
+        elif self.mode == LIEARE:
+            assoc_dim = (3, self.emb_dim)
+        elif self.mode == QUATDE:
+            rel_dim = self.emb_dim
+            rel_transfer_dim = self.emb_dim
+            ent_transfer_dim = self.emb_dim
         else:
             raise ValueError('unsupported mode: {}. allowed are {}'\
                              .format(self.mode, ', '.join(MODES_STR)))
             
         # init actual parameter
-        self.word_assoc_weights = {r:self.model.add_parameters(assoc_dim) for r in self.relation_names}
+        if self.mode == QUATDE:
+            self.rel_weights = {r:self.model.add_parameters(rel_dim) for r in self.relation_names}
+            self.rel_transfer = {r:self.model.add_parameters(rel_transfer_dim) for r in self.relation_names}
+            self.ent_transfer = [self.model.add_parameters(ent_transfer_dim) for _ in range(len(self.embeddings))]
+        else:
+            self.word_assoc_weights = {r:self.model.add_parameters(assoc_dim) for r in self.relation_names}
         if model_path is not None:
             self.model.populate(model_path + '.dyn')
         
         timeprint('finished initialization for association model.')
+    
+    def _calc(self, h, r, dy_op):
+        if dy_op:
+            s_a, x_a, y_a, z_a = h
+            s_b, x_b, y_b, z_b = r
+            denominator_b = dy.sqrt(dy.square(s_b) + dy.square(x_b) + dy.square(y_b) + dy.square(z_b))
+            s_b = dy.cdiv(s_b, denominator_b)
+            x_b = dy.cdiv(x_b, denominator_b)
+            y_b = dy.cdiv(y_b, denominator_b)
+            z_b = dy.cdiv(z_b, denominator_b)
+            A = dy.cmult(s_a, s_b) - dy.cmult(x_a, x_b) - dy.cmult(y_a, y_b) - dy.cmult(z_a, z_b)
+            B = dy.cmult(s_a, x_b) + dy.cmult(s_b, x_a) + dy.cmult(y_a, z_b) - dy.cmult(y_b, z_a)
+            C = dy.cmult(s_a, y_b) + dy.cmult(s_b, y_a) + dy.cmult(z_a, x_b) - dy.cmult(z_b, x_a)
+            D = dy.cmult(s_a, z_b) + dy.cmult(s_b, z_a) + dy.cmult(x_a, y_b) - dy.cmult(x_b, y_a)
+            return dy.concatenate([A, B, C, D], d=0)
+        else:
+            if len(h.shape) == 1:
+                h = h.reshape((1,-1))
+            if len(r.shape) == 1:
+                r = r.reshape((1,-1))
+            s_a, x_a, y_a, z_a = np.split(h, 4, axis=1)
+            s_b, x_b, y_b, z_b = np.split(r, 4, axis=1)
+            denominator_b = np.sqrt(s_b ** 2 + x_b ** 2 + y_b ** 2 + z_b ** 2)
+            s_b = s_b / denominator_b
+            x_b = x_b / denominator_b
+            y_b = y_b / denominator_b
+            z_b = z_b / denominator_b
+            A = s_a * s_b - x_a * x_b - y_a * y_b - z_a * z_b
+            B = s_a * x_b + s_b * x_a + y_a * z_b - y_b * z_a
+            C = s_a * y_b + s_b * y_a + z_a * x_b - z_b * x_a
+            D = s_a * z_b + s_b * z_a + x_a * y_b - x_b * y_a
+            return np.squeeze(np.concatenate([A, B, C, D], axis=1))
+      
+    def _split(self, arr, s):
+        tmp = np.split(arr, s, axis=0)
+        return [dy.inputVector(t) for t in tmp]
+
+    def _transfer(self, x, x_transfer, r_transfer, dy_op=True):
+        ent_transfer = self._calc(x, x_transfer, dy_op)
+        if dy_op:
+            ent_transfer = self._split(ent_transfer.npvalue(), 4)
+        ent_rel_transfer = self._calc(ent_transfer, r_transfer, dy_op)
+        return ent_rel_transfer
         
     def word_assoc_score(self, source_idx, target_idx, relation):
         """
@@ -94,11 +153,12 @@ class AssociationModel:
         """
         # prepare
         s = self.embeddings[source_idx]
-        if self.no_assoc:
-            A = dy.const_parameter(self.word_assoc_weights[relation])
-        else:
-            A = dy.parameter(self.word_assoc_weights[relation])
-        dy.dropout(A, self.dropout)
+        if self.mode != QUATDE:
+            if self.no_assoc:
+                A = dy.const_parameter(self.word_assoc_weights[relation])
+            else:
+                A = dy.parameter(self.word_assoc_weights[relation])
+            dy.dropout(A, self.dropout)
         t = self.embeddings[target_idx]
         
         # compute
@@ -113,6 +173,21 @@ class AssociationModel:
             return -dy.l2_norm(s - t + A)
         elif self.mode == DISTMULT:
             return dy.sum_elems(dy.cmult(dy.cmult(s, A), t))
+        elif self.mode == STRUCTURED_EMBED_MODE:
+            return dy.l1_distance(A[0] * s, A[1] * t)
+        elif self.mode == LIEARE:
+            return dy.l1_distance(dy.cmult(A[1], s) + A[0], dy.cmult(A[2], t))
+        elif self.mode == QUATDE:
+            s = self._split(s.npvalue(), 4)
+            r = self._split(self.rel_weights[relation].npvalue(), 4)
+            t = self._split(t.npvalue(), 4)
+            h_transfer = self._split(self.ent_transfer[source_idx].npvalue(), 4)
+            t_transfer = self._split(self.ent_transfer[target_idx].npvalue(), 4)
+            r_transfer = self._split(self.rel_transfer[relation].npvalue(), 4)
+            h1 = self._split(self._transfer(s, h_transfer, r_transfer).npvalue(), 4)
+            t1 = self._transfer(t, t_transfer, r_transfer)
+            hr = self._calc(h1, r, dy_op=True)
+            return dy.sum_elems(dy.cmult(hr, t1))
     
     def source_ranker_cache(self, rel):
         """
@@ -121,7 +196,8 @@ class AssociationModel:
         :return: mode-appropriate pre-computation for association scores
         """
         T = self.embeddings.as_array()
-        A = self.word_assoc_weights[rel].as_array()
+        if self.mode != QUATDE:
+            A = self.word_assoc_weights[rel].as_array()
         if self.mode == BILINEAR_MODE:
             return A.dot(T.transpose())
         elif self.mode == DIAG_RANK1_MODE:
@@ -133,6 +209,16 @@ class AssociationModel:
             return A - T
         elif self.mode == DISTMULT:
             return A * T # elementwise, broadcast
+        elif self.mode == STRUCTURED_EMBED_MODE:
+            return (A[0], - A[1].dot(T.transpose()))
+        elif self.mode == LIEARE:
+            return (A[0], A[1], A[2] * T)
+        elif self.mode == QUATDE:
+            r = self.rel_weights[rel].npvalue()
+            T_transfer = np.concatenate([ent.npvalue() for ent in self.ent_transfer])
+            r_transfer = self.rel_transfer[rel].npvalue()
+            T1 = self._transfer(T, T_transfer, r_transfer, dy_op=False)
+            return (r, r_transfer, T1)
 
     def target_ranker_cache(self, rel):
         """
@@ -153,6 +239,17 @@ class AssociationModel:
             return S + A
         elif self.mode == DISTMULT:
             return S * A # elementwise, broadcast
+        elif self.mode == STRUCTURED_EMBED_MODE:
+            return (A[0].dot(S.transpose()), A[1])
+        elif self.mode == LIEARE:
+            return (A[1] * S + A[0], A[2])
+        elif self.mode == QUATDE:
+            r = self.rel_weights[rel].npvalue()
+            H_transfer = np.concatenate([ent.npvalue() for ent in self.ent_transfer])
+            r_transfer = self.rel_transfer[rel].npvalue()
+            H1 = self._transfer(S, H_transfer, r_transfer, dy_op=False)
+            hr = self._calc(H1, r, dy_op=False).reshape((1,-1), dy_op=False)
+            return (r_transfer, hr)
     
     def score_from_source_cache(self, cache, src):
         """
@@ -171,6 +268,21 @@ class AssociationModel:
             return -np.sqrt((diff_vecs * diff_vecs).sum(1))
         elif self.mode == DISTMULT:
             return cache.dot(s)
+        elif self.mode == STRUCTURED_EMBED_MODE:
+            leftEntityEmbed = (cache[0].dot(s)).reshape((-1,1))
+            rightEntityEmbed = cache[1]
+            return np.abs(leftEntityEmbed - rightEntityEmbed).sum(0)
+        elif self.mode == LIEARE:
+            return np.abs(cache[1] * s + cache[0] - cache[2]).sum(1)
+        elif self.mode == QUATDE:
+            r = cache[0]
+            r_transfer = cache[1]
+            T1 = cache[2]
+            h_transfer = self.ent_transfer[src].npvalue()
+            h1 = self._transfer(s, h_transfer, r_transfer, dy_op=False)
+            hr = self._calc(h1, r, dy_op=False).reshape((1,-1), dy_op=False)
+            return np.sum(hr * T1)
+
     
     def score_from_target_cache(self, cache, trg):
         """
@@ -189,6 +301,18 @@ class AssociationModel:
             return -np.sqrt((diff_vecs * diff_vecs).sum(1)) #[-np.linalg.norm(s) for s in t + cache]
         elif self.mode == DISTMULT:
             return cache.dot(t)
+        elif self.mode == STRUCTURED_EMBED_MODE:
+            leftEntityEmbed = cache[0]
+            rightEntityEmbed = (cache[1].dot(t)).reshape((-1,1))
+            return np.abs(leftEntityEmbed - rightEntityEmbed).sum(0)
+        elif self.mode == LIEARE:
+            return np.abs(cache[0] - cache[1] * t).sum(1)
+        elif self.mode == QUATDE:
+            r_transfer = cache[0]
+            hr = cache[1]
+            t_transfer = self.ent_transfer[trg].npvalue()
+            t1 = self._transfer(t, t_transfer, r_transfer, dy_op=False).reshape((1,-1))
+            return np.sum(hr * t1)
     
     def save(self, filename):
         self.model.save(filename)
@@ -506,8 +630,8 @@ if __name__ == '__main__':
                             timeprint('saving trained model to {}'.format(saved_name))
                             assoc_model.save(saved_name)
                             # remove previous model(s)
-                            if last_saved_name is not None:
-                                os.remove(last_saved_name)
+                            # if last_saved_name is not None:
+                            #     os.remove(last_saved_name)
                     else: break
                     dev_mrrs.append(ep_mrr)
                 
