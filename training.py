@@ -2,10 +2,14 @@
 Training algorithms for ERGMs in supervised WordNet setting
 Release note: only keeping macro mode here
 '''
+import enum
 import dynet as dy
 import numpy as np
-import copy
+import copy 
 from tqdm import tqdm
+import scipy
+from bisect import bisect
+from random import shuffle
 
 from io_utils import timeprint
 from multigraph_utils import targets
@@ -16,6 +20,11 @@ __author__ = "Yuval Pinter, 2018"
 
 MARGIN = 1.0
 
+# For easy use of switching between experiments change the below string to:
+# "negative" for negative sampling experiment
+# "importance" for importance sampling experiment
+# "hierarchical" for hierarchical softmax experiment
+samplingType = "hierarchical"
 
 def macro_node_iteration(opts, multi_graph, assoc_cache,
                          trainer, log_file, synsets, rel, src_i, use_assoc):
@@ -72,19 +81,121 @@ def macro_node_iteration(opts, multi_graph, assoc_cache,
 
     # false targets scoring - importance sampling
 
-    # compute softmax over all false targets based on bilinear scores
-    if use_assoc:
-        assoc_sc = multi_graph.score_from_source_cache(assoc_cache, src_i)
-        neg_assocs = {j: s for j, s in enumerate(assoc_sc) if j not in true_targets and j != src_i}
-    else:
-        neg_assocs = {j: 1.0 for j in range(N) if j not in true_targets and j != src_i}
-    neg_probs = softmaxify(neg_assocs)
+    ### NEGATIVE SAMPLING
+    #----------------------------------------------------------------------
+    if samplingType == "negative":
+        # compute softmax over all false targets based on bilinear scores
+        if use_assoc:
+            assoc_sc = multi_graph.score_from_source_cache(assoc_cache, src_i)
+            neg_assocs = {j: s for j, s in enumerate(assoc_sc) if j not in true_targets and j != src_i}
+        else:
+            neg_assocs = {j: 1.0 for j in range(N) if j not in true_targets and j != src_i}
+        neg_probs = softmaxify(neg_assocs)
 
-    # collect negative samples
-    # TODO see if searchsorted can work here too (issue in dynet repo)
-    neg_samples = {t: [dy.np.random.choice(range(len(neg_assocs)), p=neg_probs)\
-                      for _ in range(opts.neg_samp)]\
-                   for t in true_targets} # sample without return?
+        # TODO see if searchsorted can work here too (issue in dynet repo)
+        neg_samples = {t: [dy.np.random.choice(range(len(neg_assocs)), p=neg_probs)\
+                        for _ in range(opts.neg_samp)]\
+                    for t in true_targets} # sample without return?
+    #----------------------------------------------------------------------
+
+    ### IMPORTANCE SAMPLING
+    # note that the final sample values are called neg_samples for convenienve/for it to be
+    # compatible with the rest of the code, however the samples are not negative samples
+    #----------------------------------------------------------------------
+    elif samplingType == "importance":
+        # compute softmax over all false targets based on bilinear scores
+        if use_assoc:
+            assoc_sc = multi_graph.score_from_source_cache(assoc_cache, src_i)
+            neg_assocs = {j: s for j, s in enumerate(assoc_sc) if j not in true_targets and j != src_i}
+        else:
+            neg_assocs = {j: 1.0 for j in range(N) if j not in true_targets and j != src_i}
+        neg_probs = softmaxify(neg_assocs)
+        
+        # Set hyper parameter n to approximate a distribution for importance sampling
+        n = 100000
+        samples = []
+        for i in range(n):
+            x_samp = dy.np.random.choice(range(len(neg_assocs)), p=neg_probs)
+            samples += [x_samp]
+        # see report for citation to mikolov where gaussian is used
+        new_mean = np.mean(samples)
+        new_sd = np.std(samples)
+        def importanceFind(x_i):
+            qVal = scipy.stats.norm.pdf(x_i,new_mean,new_sd)
+            pVal = neg_probs[bisect(range(len(neg_assocs)),x_i)]
+            return x_i * (pVal/qVal)
+        neg_samples = {t: [importanceFind(dy.np.random.normal(new_mean, new_sd))\
+                        for _ in range(opts.neg_samp)]\
+                    for t in true_targets}
+    #----------------------------------------------------------------------
+
+    ### HIERARCHICAL SOFTMAX
+    # note that the final sample values are called neg_samples for convenienve/for it to be
+    # compatible with the rest of the code, however the samples are not negative samples
+    #----------------------------------------------------------------------
+    elif samplingType == "hierarchical":
+        # compute hierarchical softmax 
+        # note that we can do this over all false targets based on bilinear scores similar to before
+        if use_assoc:
+            assoc_sc = multi_graph.score_from_source_cache(assoc_cache, src_i)
+            neg_assocs = {j: s for j, s in enumerate(assoc_sc) if j not in true_targets and j != src_i}
+        else:
+            neg_assocs = {j: 1.0 for j in range(N) if j not in true_targets and j != src_i}
+        # useful binary tree functions for hierarchical softmax
+        def hiersoftmaxify(neg_assocs,treeCheck):
+            # Use this to create the binary tree for given predictor sample
+            # if tree does not already exist
+            def create_tree(neg_assocs):
+                shuffle(neg_assocs)
+                temp_treeHolder = []
+                if (len(neg_assocs) > 2):
+                    for idx in range(0, len(neg_assocs), 2):
+                        if len(neg_assocs) - idx - 1 > 0:
+                            temp_treeHolder.append([neg_assocs[idx], neg_assocs[idx+1]])
+                        else:
+                            temp_treeHolder.append(neg_assocs[idx])
+                else:
+                    print("Warning: Inproper size for Hierarchical Softmax")
+                return temp_treeHolder
+            if treeCheck:
+                newTree = create_tree(neg_assocs)
+            else:
+                return softmaxify(neg_assocs)
+            # create function to recursively count number of nodes in binary tree
+            def count_nodes(binaryTree):
+                totalCount = 0
+                for subTree in binaryTree:
+                    totalCount += 1
+                    totalCount += count_nodes(subTree)
+                return totalCount
+            # create function to easily traverse binary tree by getting all subtrees
+            def all_subTrees(binaryTree):
+                newSub = []
+                for subTree in binaryTree:
+                    newSub += subTree
+                return newSub
+            # create function to calculate path between root word and all leaf words
+            def calculate_path(binaryTree):
+                if(len(binaryTree) == 1):
+                    return ([binaryTree],1)
+                for (counter,subTree) in enumerate(binaryTree):
+                    oldPath,oldCounter = calculate_path(subTree)
+                    return (oldPath + [subTree],oldCounter + counter)
+            totalPath, totalValue = calculate_path(newTree)
+            totalNodes = count_nodes(newTree)
+            subtrees = all_subTrees(newTree)
+            subTreeCounter = 0
+            for newSubTree in subtrees:
+                subTreeCounter += len(newSubTree)
+            denominator = np.exp(subTreeCounter) + np.exp(totalNodes)
+            return np.exp(totalValue)/denominator
+        neg_probs = hiersoftmaxify(neg_assocs, False)
+        neg_samples = {t: [dy.np.random.choice(range(len(neg_assocs)), p=neg_probs)\
+                        for _ in range(opts.neg_samp)]\
+                    for t in true_targets}
+    #----------------------------------------------------------------------
+    else:
+        print("Invalid type of sampling experiment: please read documentation at top of file!")
 
     # for reporting
     if perform_verbosity_steps:
