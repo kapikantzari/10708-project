@@ -18,10 +18,10 @@ DISTMULT = 'distmult'
 DIAG_RANK1_MODE = 'diag_r1'
 TRANSLATIONAL_EMBED_MODE = 'transE'
 STRUCTURED_EMBED_MODE = 'sE'
-LIEARE = 'lineaRE'
+LINEARE = 'lineaRE'
 QUATDE = 'quatDE'
 
-MODES = [BILINEAR_MODE, DISTMULT, DIAG_RANK1_MODE, TRANSLATIONAL_EMBED_MODE, STRUCTURED_EMBED_MODE, LIEARE, QUATDE]
+MODES = [BILINEAR_MODE, DISTMULT, DIAG_RANK1_MODE, TRANSLATIONAL_EMBED_MODE, STRUCTURED_EMBED_MODE, LINEARE, QUATDE]
 MODES_STR = ', '.join(MODES)
 
 
@@ -78,7 +78,7 @@ class AssociationModel:
             assoc_dim = self.emb_dim
         elif self.mode == STRUCTURED_EMBED_MODE:
             assoc_dim = (2, self.emb_dim, self.emb_dim)
-        elif self.mode == LIEARE:
+        elif self.mode == LINEARE:
             assoc_dim = (3, self.emb_dim)
         elif self.mode == QUATDE:
             rel_dim = self.emb_dim
@@ -175,7 +175,7 @@ class AssociationModel:
             return dy.sum_elems(dy.cmult(dy.cmult(s, A), t))
         elif self.mode == STRUCTURED_EMBED_MODE:
             return dy.l1_distance(A[0] * s, A[1] * t)
-        elif self.mode == LIEARE:
+        elif self.mode == LINEARE:
             return dy.l1_distance(dy.cmult(A[1], s) + A[0], dy.cmult(A[2], t))
         elif self.mode == QUATDE:
             s = self._split(s.npvalue(), 4)
@@ -211,11 +211,11 @@ class AssociationModel:
             return A * T # elementwise, broadcast
         elif self.mode == STRUCTURED_EMBED_MODE:
             return (A[0], - A[1].dot(T.transpose()))
-        elif self.mode == LIEARE:
+        elif self.mode == LINEARE:
             return (A[0], A[1], A[2] * T)
         elif self.mode == QUATDE:
             r = self.rel_weights[rel].npvalue()
-            T_transfer = np.concatenate([ent.npvalue() for ent in self.ent_transfer])
+            T_transfer = np.concatenate([ent.npvalue().reshape((1,-1)) for ent in self.ent_transfer])
             r_transfer = self.rel_transfer[rel].npvalue()
             T1 = self._transfer(T, T_transfer, r_transfer, dy_op=False)
             return (r, r_transfer, T1)
@@ -227,7 +227,8 @@ class AssociationModel:
         :returns: mode-appropriate pre-computation for association scores
         """
         S = self.embeddings.as_array()
-        A = self.word_assoc_weights[rel].as_array()
+        if self.mode != QUATDE:
+            A = self.word_assoc_weights[rel].as_array()
         if self.mode == BILINEAR_MODE:
             return S.dot(A)
         elif self.mode == DIAG_RANK1_MODE:
@@ -241,14 +242,14 @@ class AssociationModel:
             return S * A # elementwise, broadcast
         elif self.mode == STRUCTURED_EMBED_MODE:
             return (A[0].dot(S.transpose()), A[1])
-        elif self.mode == LIEARE:
+        elif self.mode == LINEARE:
             return (A[1] * S + A[0], A[2])
         elif self.mode == QUATDE:
             r = self.rel_weights[rel].npvalue()
-            H_transfer = np.concatenate([ent.npvalue() for ent in self.ent_transfer])
+            H_transfer = np.concatenate([ent.npvalue().reshape((1,-1)) for ent in self.ent_transfer])
             r_transfer = self.rel_transfer[rel].npvalue()
             H1 = self._transfer(S, H_transfer, r_transfer, dy_op=False)
-            hr = self._calc(H1, r, dy_op=False).reshape((1,-1), dy_op=False)
+            hr = self._calc(H1, r, dy_op=False).reshape((1,-1))
             return (r_transfer, hr)
     
     def score_from_source_cache(self, cache, src):
@@ -272,7 +273,7 @@ class AssociationModel:
             leftEntityEmbed = (cache[0].dot(s)).reshape((-1,1))
             rightEntityEmbed = cache[1]
             return np.abs(leftEntityEmbed - rightEntityEmbed).sum(0)
-        elif self.mode == LIEARE:
+        elif self.mode == LINEARE:
             return np.abs(cache[1] * s + cache[0] - cache[2]).sum(1)
         elif self.mode == QUATDE:
             r = cache[0]
@@ -280,8 +281,8 @@ class AssociationModel:
             T1 = cache[2]
             h_transfer = self.ent_transfer[src].npvalue()
             h1 = self._transfer(s, h_transfer, r_transfer, dy_op=False)
-            hr = self._calc(h1, r, dy_op=False).reshape((1,-1), dy_op=False)
-            return np.sum(hr * T1)
+            hr = self._calc(h1, r, dy_op=False).reshape((1,-1))
+            return np.sum(hr * T1, axis=1).reshape((-1,))
 
     
     def score_from_target_cache(self, cache, trg):
@@ -305,14 +306,14 @@ class AssociationModel:
             leftEntityEmbed = cache[0]
             rightEntityEmbed = (cache[1].dot(t)).reshape((-1,1))
             return np.abs(leftEntityEmbed - rightEntityEmbed).sum(0)
-        elif self.mode == LIEARE:
+        elif self.mode == LINEARE:
             return np.abs(cache[0] - cache[1] * t).sum(1)
         elif self.mode == QUATDE:
             r_transfer = cache[0]
             hr = cache[1]
             t_transfer = self.ent_transfer[trg].npvalue()
             t1 = self._transfer(t, t_transfer, r_transfer, dy_op=False).reshape((1,-1))
-            return np.sum(hr * t1)
+            return np.sum(hr * t1, axis=1).reshape((-1,))
     
     def save(self, filename):
         self.model.save(filename)
