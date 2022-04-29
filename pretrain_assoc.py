@@ -130,7 +130,7 @@ class AssociationModel:
             B = s_a * x_b + s_b * x_a + y_a * z_b - y_b * z_a
             C = s_a * y_b + s_b * y_a + z_a * x_b - z_b * x_a
             D = s_a * z_b + s_b * z_a + x_a * y_b - x_b * y_a
-            return np.squeeze(np.concatenate([A, B, C, D], axis=1))
+            return np.concatenate([A, B, C, D], axis=1)
       
     def _split(self, arr, s):
         tmp = np.split(arr, s, axis=0)
@@ -249,7 +249,7 @@ class AssociationModel:
             H_transfer = np.concatenate([ent.npvalue().reshape((1,-1)) for ent in self.ent_transfer])
             r_transfer = self.rel_transfer[rel].npvalue()
             H1 = self._transfer(S, H_transfer, r_transfer, dy_op=False)
-            hr = self._calc(H1, r, dy_op=False).reshape((1,-1))
+            hr = self._calc(H1, r, dy_op=False)
             return (r_transfer, hr)
     
     def score_from_source_cache(self, cache, src):
