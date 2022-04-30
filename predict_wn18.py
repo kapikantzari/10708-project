@@ -8,6 +8,7 @@ from collections import Counter
 from contextlib import contextmanager
 
 from model import MultiGraphErgm
+from model_extra_motifs import MultiGraphErgmExtraMotifs
 from training import macro_loops
 from io_utils import timeprint, load_prediction_dataset, load_embeddings
 from multigraph_utils import targets, sources, join_sets, co_graph
@@ -302,6 +303,8 @@ if __name__ == '__main__':
     parser.add_argument("--eval-dev", action='store_true', help="evaluate on dev set, not test")
     parser.add_argument("--assoc-mode", default=TRANSLATIONAL_EMBED_MODE,
                         help="Association mode. Options: {}, default: {}".format(MODES_STR, TRANSLATIONAL_EMBED_MODE))
+    parser.add_argument("--extra_motifs", type=bool, default=True, help="use extra motifs")
+
 
     # training set engineering
     parser.add_argument("--co-hypernyms", action='store_true', help="include co-hypernym graph for scores")
@@ -405,13 +408,24 @@ if __name__ == '__main__':
     else:
         dev_results = []
         # training phase
-        if opts.model is not None:  # there's a pretrained association model
-            ergm = MultiGraphErgm(tr_graphs, embs, opts.assoc_mode, reg=opts.regularize,
+        if opts.model is not None:
+            if opts.extra_motifs:  # there's a pretrained association model
+                ergm = MultiGraphErgmExtraMotifs(tr_graphs, embs, opts.assoc_mode,
+                                      reg=opts.regularize,
+                                      dropout=drop, model_path=opts.model,
+                                      path_only_init=True)
+            else:
+                ergm = MultiGraphErgm(tr_graphs, embs, opts.assoc_mode, reg=opts.regularize,
                                   dropout=drop, model_path=opts.model,
                                   path_only_init=True)
         else:
-            ergm = MultiGraphErgm(tr_graphs, embs, opts.assoc_mode, reg=opts.regularize,
+            if opts.extra_motifs:
+                ergm = MultiGraphErgmExtraMotifs(tr_graphs, embs, opts.assoc_mode, reg=opts.regularize,
                                   dropout=drop)
+            else:
+                ergm = MultiGraphErgm(tr_graphs, embs, opts.assoc_mode,
+                                      reg=opts.regularize,
+                                      dropout=drop)
         initial_weights = ergm.ergm_weights.as_array()
         trainer = dy.AdagradTrainer(ergm.model, opts.learning_rate)
         iteration_scores = []

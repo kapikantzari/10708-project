@@ -23,3 +23,6 @@ For experiments with new association models (for example, lineaRE), specify the 
 
 ## How to run sampling experiments
 In order to run the sampling experiments, the changes are housed in `training.py`. To run the three expriments with negative sampling, importance sampling, and hierarchical softmax, please refer to the instructions in lines 23-27 of `training.py`, in summary new users just need to modify the "samplingType" variable to be either `negative`, `importance`, or `hierarchical` in order to easily swap between the experiments. Further implementation details and comments can be seen in this file.
+
+## How to run motif experiments
+For experiments with extra motifs, specify the `--extra_motifs` flag as `True`. 
